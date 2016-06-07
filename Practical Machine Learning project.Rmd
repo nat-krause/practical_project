@@ -1,0 +1,160 @@
+---
+title: "Practical Machine Learning Project"
+author: "Nathaniel Krause"
+date: "June 7, 2016"
+output: html_document
+---
+
+#Preliminaries
+
+##Loading necessary packages
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE)
+```
+
+```{r echo=TRUE}
+library(lattice)
+library(ggplot2)
+library(caret)
+library(rpart)
+library(plyr)
+library(e1071)
+library(ipred)
+```
+
+##Getting the raw data
+
+```{r echo=TRUE}
+proj_rain <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", na.strings=c("NA","","<NA>","#DIV/0!"), header=TRUE)
+proj_est <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", na.strings=c("NA","","<NA>","#DIV/0!"), header=TRUE)
+```
+
+#Exploratory analysis, feature selection, and data cleaning
+
+```{r echo=TRUE}
+head(subset(proj_rain,new_window=="yes"))
+head(subset(proj_rain,new_window=="no"))
+
+sum(proj_rain$new_window=="no")
+sum(proj_rain$new_window=="yes")
+sum(proj_est$new_window=="no")
+sum(proj_est$new_window=="yes")
+
+```
+
+It appears that additional data fields are populated for the new_window=="yes" records that are NA for the new_window=="no" records. I will refer to the former as summary records and the latter as non-summary records. There are enormously more non-summary records than summary records in the training data set and there are no summary records at all in the test data set. Therefore, I regard the summary records as irrelevant and exclude them, along with all of the columns that are not populated for nonsummary records (which can easily be identified because they are all NA on the test set).
+
+```{r echo=TRUE}
+proj_rain <- subset(proj_rain,new_window=="no")
+
+features <- names(proj_est[,colSums(is.na(proj_est)) == 0])[8:59]
+
+proj_rain <- proj_rain[,c(features,"classe")]
+proj_est <- proj_est[,c(features,"problem_id")]
+```
+
+#Model building
+
+I begin by setting the seed to 105 for reproducible results.
+
+```{r echo=TRUE}
+set.seed(105)
+```
+
+Next, I divide the provided testing set into a local testing set and a validation set.
+
+```{r echo=TRUE}
+inTrain <- createDataPartition(y=proj_rain$classe,p=0.7,list=FALSE)
+local_training <- proj_rain[inTrain,]
+validation <- proj_rain[-inTrain,]
+```
+
+I will use 2-fold cross-validation, so next I divide the local testing set into two cross-validation sets.
+
+```{r echo=TRUE}
+inTrainCV1 <- createDataPartition(y=local_training $classe,p=0.5,list=FALSE)
+CrossVal1 <- local_training[inTrainCV1,]
+CrossVal2 <- local_training[-inTrainCV1,]
+```
+
+##Subsample 1 model building, initial models
+
+The models that will be tested include a classification tree model (caret train method "rpart"), a bagged tree model (caret train method "treebag"), and stacked tree model combining the previous two models (also using "rpart" on the combined set of predictions). Test predictions are based on Subsample 2.
+
+```{r echo=TRUE}
+tree_model1 <- train(classe~.,data=CrossVal1,method="rpart")
+bagging_model1 <- train(classe~.,data=CrossVal1,method="treebag")
+tree_pred1 <- predict(tree_model1,CrossVal2)
+bagging_pred1 <- predict(bagging_model1,CrossVal2)
+```
+
+##Subsample 1 model building, stacked model
+
+```{r echo=TRUE}
+predDF1 <- data.frame(tree_pred1=predict (tree_model1,CrossVal2),bagging_pred1=predict (bagging_model1,CrossVal2),classe=CrossVal2$classe)
+stacked_model1 <- train(classe~.,method="rpart",data=predDF1)
+stacked_pred1 <- predict(stacked_model1,CrossVal2)
+```
+
+##Subsample 2 model building, initial models
+
+For the corresponding calculations on Subsample 2, the train function is applied to Subsample 2 while test predictions are based on Subsample 1.
+
+```{r echo=TRUE}
+tree_model2 <- train(classe~.,data=CrossVal2,method="rpart")
+bagging_model2 <- train(classe~.,data=CrossVal2,method="treebag")
+tree_pred2 <- predict(tree_model2,CrossVal1)
+bagging_pred2 <- predict(bagging_model2,CrossVal1)
+```
+
+##Subsample 2 model building, stacked model
+
+```{r echo=TRUE}
+predDF2 <- data.frame(tree_pred2=predict (tree_model2,CrossVal1),bagging_pred2=predict (bagging_model2,CrossVal1),classe=CrossVal1$classe)
+stacked_model2 <- train(classe~.,method="rpart",data=predDF2)
+stacked_pred2 <- predict(stacked_model2,CrossVal1)
+```
+
+#Cross validating accuracy of models
+
+```{r echo=TRUE}
+tree_model1_accuracy <- sum(tree_pred1==CrossVal2$classe)/length(CrossVal2$classe)
+bagging_model1_accuracy <- sum(bagging_pred1==CrossVal2$classe)/length(CrossVal2$classe)
+stacked_model1_accuracy <- sum(stacked_pred1==CrossVal2$classe)/length(CrossVal2$classe)
+
+tree_model2_accuracy <- sum(tree_pred2==CrossVal1$classe)/length(CrossVal1$classe)
+bagging_model2_accuracy <- sum(bagging_pred2==CrossVal1$classe)/length(CrossVal1$classe)
+stacked_model2_accuracy <- sum(stacked_pred2==CrossVal1$classe)/length(CrossVal1$classe)
+
+tree_model1_accuracy
+bagging_model1_accuracy
+stacked_model1_accuracy
+tree_model2_accuracy
+bagging_model2_accuracy
+stacked_model2_accuracy
+
+```
+
+#Model selection and assessment
+
+At 97.21% accuracy, bagging_model2 appears to be the most reliable predictor. I now apply that model to the validation set to assess its accuracy against as-yet untouched data.
+
+```{r echo=TRUE}
+final_model <- bagging_model2
+validation_pred <- predict(final_model,validation)
+final_model_validation_accuracy <- sum(validation_pred==validation$classe)/length(validation$classe)
+final_model_validation_accuracy
+```
+
+The resulting 97.54% accuracy is very close to what we saw during cross-validation and is a good estimate of out of sample error. This bagging model is our best bet.
+
+#Test data predictions: rubber, meet road!
+
+Lastly, I generate a vector of predictions for the missing classe values for the test data.
+
+```{r echo=TRUE}
+test_pred <- predict(final_model,proj_est)
+print(test_pred)
+
+```
